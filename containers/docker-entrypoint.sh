@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Runtime configuration
+export STRIX_RUNTIME_BACKEND=docker
+
 CAIDO_PORT=48080
 CAIDO_LOG="/tmp/caido_startup.log"
 
@@ -179,6 +182,39 @@ for i in {1..10}; do
   fi
   sleep 1
 done
+
+# Start HTTP server if enabled
+if [ "${HTTP_SERVER:-false}" = "true" ]; then
+  echo "Starting HTTP server..."
+  HTTP_SERVER_LOG="/tmp/http_server.log"
+  HTTP_SERVER_PORT="${HTTP_SERVER_PORT:-8089}"
+  WEBHOOK_URL="${WEBHOOK_URL:-}"
+
+  sudo -E -u pentester \
+    poetry run python -m strix.runtime.http_server \
+    --host=0.0.0.0 \
+    --port="$HTTP_SERVER_PORT" \
+    ${WEBHOOK_URL:+--webhook-url="$WEBHOOK_URL"} \
+    > "$HTTP_SERVER_LOG" 2>&1 &
+
+  HTTP_SERVER_PID=$!
+  echo "HTTP server started with PID $HTTP_SERVER_PID on port $HTTP_SERVER_PORT"
+
+  # Wait for HTTP server to be ready
+  for i in {1..10}; do
+    if curl -s "http://127.0.0.1:$HTTP_SERVER_PORT/health" | grep -q '"status":"healthy"'; then
+      echo "✅ HTTP server healthy on port $HTTP_SERVER_PORT"
+      break
+    fi
+    if [ $i -eq 10 ]; then
+      echo "ERROR: HTTP server failed to become healthy"
+      echo "=== HTTP server log ==="
+      cat "$HTTP_SERVER_LOG" 2>/dev/null || echo "(no log)"
+      exit 1
+    fi
+    sleep 1
+  done
+fi
 
 echo "✅ Container ready"
 
