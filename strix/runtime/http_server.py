@@ -103,21 +103,70 @@ def _find_latest_run(cwd: Path) -> Path | None:
     return latest_run
 
 
+def _process_assessment_vulnerability(vuln: dict) -> dict:
+    sev = _normalize_severity(str(vuln.get("severity", "medium")))
+    title = vuln.get("title", "Security Vulnerability")
+    endpoint = vuln.get("endpoint") or (vuln.get("endpoints") or [""])[0]
+    impact = vuln.get("impact", "")
+    evidence = vuln.get("evidence", {})
+    desc_parts = [impact]
+    if evidence:
+        desc_parts.append(f"Evidence: {json.dumps(evidence)}")
+    description = " | ".join(p for p in desc_parts if p)
+    poc = "\n".join(vuln.get("reproduction") or [])
+    return {
+        "original_line": 0,
+        "actual_line": 0,
+        "category": "Application",
+        "cve": None,
+        "cvssv3_vector": None,
+        "cwe": [],
+        "date": {"$date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
+        "description": description,
+        "references": [],
+        "scanner_report_code": poc,
+        "severity": sev,
+        "start_column": 0,
+        "tags": ["DAST", "AI-Validated"],
+        "title": title,
+        "tool": "strix",
+        "tool_id": vuln.get("id", "strix-dast"),
+        "type": "DAST",
+        "confidence": 85,
+        "mitigation": "",
+        "endpoint": endpoint,
+    }
+
+
+def _load_workspace_assessment(cwd: Path) -> list[dict]:
+    for name in ("juice_shop_assessment.json", "assessment.json", "findings.json"):
+        assessment_path = cwd / name
+        if assessment_path.exists():
+            data = json.loads(assessment_path.read_text())
+            if isinstance(data, dict):
+                vulns = data.get("vulnerabilities", [])
+            else:
+                vulns = data
+            return [_process_assessment_vulnerability(v) for v in vulns if isinstance(v, dict)]
+    return []
+
+
 def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
     env = os.environ.copy()
     env["STRIX_SANDBOX_MODE"] = "true"
     env["LLM_API_KEY"] = request.api_key
     env["OPENAI_API_KEY"] = request.api_key
+    deployment = request.deployment_name or "gpt-4o"
     if request.api_base:
         env["LLM_API_BASE"] = request.api_base
         env["OPENAI_API_BASE"] = request.api_base
-        env["AZURE_OPENAI_ENDPOINT"] = request.api_base
-    deployment = request.deployment_name or "gpt-4o"
+        if "cognitiveservices.azure.com" in request.api_base or "openai.azure.com" in request.api_base:
+            env["AZURE_OPENAI_ENDPOINT"] = request.api_base
     if request.deployment_name:
         env["OPENAI_API_MODEL"] = request.deployment_name
         env["AZURE_OPENAI_DEPLOYMENT_ID"] = request.deployment_name
     # Map platform provider + base URL to litellm model prefix for STRIX_LLM
-    if request.api_base and "cognitiveservices.azure.com" in request.api_base:
+    if request.api_base and ("cognitiveservices.azure.com" in request.api_base or "openai.azure.com" in request.api_base):
         env["STRIX_LLM"] = f"azure/{deployment}"
     elif request.provider == "deepseek":
         env["STRIX_LLM"] = f"deepseek/{deployment}"
@@ -136,9 +185,12 @@ def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
     )
 
     latest_run = _find_latest_run(cwd)
-    if not latest_run:
-        return []
-    return _load_vulnerabilities(latest_run)
+    if latest_run:
+        findings = _load_vulnerabilities(latest_run)
+        if findings:
+            return findings
+    # Fallback: check workspace-level assessment files
+    return _load_workspace_assessment(cwd)
 
 
 async def _post_results(request: ScanRequest, findings: list[dict]) -> None:

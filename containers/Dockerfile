@@ -172,7 +172,7 @@ COPY strix/__init__.py strix/
 COPY strix/config/ /app/strix/config/
 COPY strix/utils/ /app/strix/utils/
 COPY strix/telemetry/ /app/strix/telemetry/
-COPY strix/runtime/tool_server.py strix/runtime/__init__.py strix/runtime/runtime.py strix/runtime/http_server.py /app/strix/runtime/
+COPY strix/runtime/ /app/strix/runtime/
 COPY strix/tools/ /app/strix/tools/
 COPY strix/agents/ /app/strix/agents/
 COPY strix/interface/ /app/strix/interface/
