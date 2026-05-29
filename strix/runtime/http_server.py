@@ -106,15 +106,25 @@ def _find_latest_run(cwd: Path) -> Path | None:
 def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
     env = os.environ.copy()
     env["STRIX_SANDBOX_MODE"] = "true"
+    env["LLM_API_KEY"] = request.api_key
     env["OPENAI_API_KEY"] = request.api_key
     if request.api_base:
+        env["LLM_API_BASE"] = request.api_base
         env["OPENAI_API_BASE"] = request.api_base
         env["AZURE_OPENAI_ENDPOINT"] = request.api_base
+    deployment = request.deployment_name or "gpt-4o"
     if request.deployment_name:
         env["OPENAI_API_MODEL"] = request.deployment_name
         env["AZURE_OPENAI_DEPLOYMENT_ID"] = request.deployment_name
-    if request.provider:
-        env["LLM_PROVIDER"] = request.provider
+    # Map platform provider + base URL to litellm model prefix for STRIX_LLM
+    if request.api_base and "cognitiveservices.azure.com" in request.api_base:
+        env["STRIX_LLM"] = f"azure/{deployment}"
+    elif request.provider == "deepseek":
+        env["STRIX_LLM"] = f"deepseek/{deployment}"
+    elif request.provider:
+        env["STRIX_LLM"] = f"{request.provider}/{deployment}"
+    else:
+        env["STRIX_LLM"] = f"openai/{deployment}"
 
     timeout = int(os.getenv("STRIX_SANDBOX_EXECUTION_TIMEOUT", "3600"))
     subprocess.run(
