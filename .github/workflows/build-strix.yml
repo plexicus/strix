@@ -8,6 +8,7 @@ on:
       - uat
       - dev
       - standalone
+      - "feat/**"
     paths:
       - "strix/**"
       - "containers/**"

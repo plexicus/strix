@@ -1,6 +1,19 @@
 #!/bin/bash
 set -e
 
+# In HTTP server mode, skip Caido/tool-server setup and exec the API server as the foreground process.
+if [ "${HTTP_SERVER:-false}" = "true" ]; then
+  cd /app
+  export PYTHONPATH=/app
+  export STRIX_SANDBOX_MODE=true
+  export POETRY_VIRTUALENVS_CREATE=false
+  exec sudo -E -u pentester \
+    poetry run python -m strix.runtime.http_server \
+    --host=0.0.0.0 \
+    --port="${TOOL_SERVER_PORT:-8089}" \
+    ${MESSAGE_URL:+--webhook-url="$MESSAGE_URL"}
+fi
+
 CAIDO_PORT=48080
 CAIDO_LOG="/tmp/caido_startup.log"
 
