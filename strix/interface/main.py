@@ -6,6 +6,7 @@ Strix Agent Interface
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -523,8 +524,9 @@ def main() -> None:
     if args.config:
         apply_config_override(args.config)
 
-    check_docker_installed()
-    pull_docker_image()
+    if os.getenv("STRIX_SANDBOX_MODE", "false").lower() != "true":
+        check_docker_installed()
+        pull_docker_image()
 
     validate_environment()
     asyncio.run(warm_up_llm())
