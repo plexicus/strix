@@ -331,6 +331,18 @@ class DockerRuntime(AbstractRuntime):
         except (NotFound, DockerException):
             pass
 
+    def read_workspace_file(self, path: str) -> str | None:
+        """Read a file from the sandbox container."""
+        if self._scan_container is None:
+            return None
+        try:
+            result = self._scan_container.exec_run(["cat", path], user="pentester")
+            if result.exit_code == 0:
+                return result.output.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        return None
+
     def cleanup(self) -> None:
         if self._scan_container is not None:
             container_name = self._scan_container.name
