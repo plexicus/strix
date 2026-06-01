@@ -67,6 +67,7 @@ google-cloud-aiplatform = { version = ">=1.38", optional = true }
 # Sandbox-only dependencies (only needed inside Docker container)
 fastapi = { version = "*", optional = true }
 uvicorn = { version = "*", optional = true }
+httpx = { version = "*", optional = true }
 ipython = { version = "^9.3.0", optional = true }
 openhands-aci = { version = "^0.3.0", optional = true }
 playwright = { version = "^1.48.0", optional = true }

@@ -172,8 +172,12 @@ COPY strix/__init__.py strix/
 COPY strix/config/ /app/strix/config/
 COPY strix/utils/ /app/strix/utils/
 COPY strix/telemetry/ /app/strix/telemetry/
-COPY strix/runtime/tool_server.py strix/runtime/__init__.py strix/runtime/runtime.py /app/strix/runtime/
+COPY strix/runtime/ /app/strix/runtime/
 COPY strix/tools/ /app/strix/tools/
+COPY strix/agents/ /app/strix/agents/
+COPY strix/interface/ /app/strix/interface/
+COPY strix/llm/ /app/strix/llm/
+COPY strix/skills/ /app/strix/skills/
 
 RUN echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.bashrc && \
     echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.profile
@@ -186,3 +190,4 @@ USER pentester
 WORKDIR /workspace
 
 ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["strix"]

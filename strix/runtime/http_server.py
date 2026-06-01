@@ -2,30 +2,245 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
+import json
 import os
-import signal
-import sys
+import re
 import subprocess
-import tempfile
-import shutil
+import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-import httpx
-import tenacity
 
+import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-
-
-# Global variables set by main()
 WEBHOOK_URL: str | None = None
-REQUEST_TIMEOUT: int = 120
+
+app = FastAPI()
+
+
+class ScanRequest(BaseModel):
+    provider: str
+    deployment_name: str | None = None
+    api_key: str
+    api_base: str | None = None
+    url: str
+    authorization: dict | None = None
+    token: str
+    request_id: str
+    repository_id: str
+    first_time_scan: bool = False
+    custom_prompt: str | None = None
+
+
+def _normalize_severity(sev: str) -> str:
+    mapping = {"info": "Informational", "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical"}
+    return mapping.get(sev.lower(), "Medium")
+
+
+def _extract_cwe(content: str) -> list[str]:
+    match = re.search(r"CWE-(\d+)", content)
+    return [f"CWE-{match.group(1)}"] if match else []
+
+
+def _process_vulnerability(vuln: dict) -> dict:
+    content = vuln.get("content", "")
+    return {
+        "original_line": 0,
+        "actual_line": 0,
+        "category": "Application",
+        "cve": vuln.get("cve_id"),
+        "cvssv3_vector": vuln.get("cvss_vector"),
+        "cwe": _extract_cwe(content),
+        "date": {"$date": vuln.get("timestamp") or datetime.now(timezone.utc).isoformat()},
+        "description": content,
+        "references": vuln.get("references", []),
+        "scanner_report_code": vuln.get("proof_of_concept", ""),
+        "severity": _normalize_severity(vuln.get("severity", "medium")),
+        "start_column": 0,
+        "tags": vuln.get("tags", ["DAST", "AI-Validated"]),
+        "title": vuln.get("title", "Security Vulnerability"),
+        "tool": "strix",
+        "tool_id": vuln.get("id", "strix-dast"),
+        "type": "DAST",
+        "confidence": 85,
+        "mitigation": vuln.get("mitigation", "Refer to PoC for remediation context."),
+    }
+
+
+def _load_vulnerabilities(run_dir: Path) -> list[dict]:
+    for name in ("vulnerabilities.json", "report.json"):
+        json_path = run_dir / name
+        if json_path.exists():
+            data = json.loads(json_path.read_text())
+            vulns = data if isinstance(data, list) else data.get("vulnerabilities", [])
+            return [_process_vulnerability(v) for v in vulns]
+
+    csv_path = run_dir / "vulnerabilities.csv"
+    if csv_path.exists():
+        with csv_path.open() as f:
+            return [_process_vulnerability(row) for row in csv.DictReader(f)]
+
+    return []
+
+
+def _find_latest_run(cwd: Path) -> Path | None:
+    strix_runs_dir = cwd / "strix_runs"
+    if not strix_runs_dir.exists():
+        return None
+    latest_run = None
+    latest_mtime = 0.0
+    for entry in strix_runs_dir.iterdir():
+        if entry.is_dir():
+            mtime = entry.stat().st_mtime
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_run = entry
+    return latest_run
+
+
+def _process_assessment_vulnerability(vuln: dict) -> dict:
+    sev = _normalize_severity(str(vuln.get("severity", "medium")))
+    title = vuln.get("title", "Security Vulnerability")
+    endpoint = vuln.get("endpoint") or (vuln.get("endpoints") or [""])[0]
+    impact = vuln.get("impact", "")
+    evidence = vuln.get("evidence", {})
+    desc_parts = [impact]
+    if evidence:
+        desc_parts.append(f"Evidence: {json.dumps(evidence)}")
+    description = " | ".join(p for p in desc_parts if p)
+    poc = "\n".join(vuln.get("reproduction") or [])
+    return {
+        "original_line": 0,
+        "actual_line": 0,
+        "category": "Application",
+        "cve": None,
+        "cvssv3_vector": None,
+        "cwe": [],
+        "date": {"$date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
+        "description": description,
+        "references": [],
+        "scanner_report_code": poc,
+        "severity": sev,
+        "start_column": 0,
+        "tags": ["DAST", "AI-Validated"],
+        "title": title,
+        "tool": "strix",
+        "tool_id": vuln.get("id", "strix-dast"),
+        "type": "DAST",
+        "confidence": 85,
+        "mitigation": "",
+        "endpoint": endpoint,
+    }
+
+
+def _load_workspace_assessment(cwd: Path) -> list[dict]:
+    for name in ("juice_shop_assessment.json", "assessment.json", "findings.json"):
+        assessment_path = cwd / name
+        if assessment_path.exists():
+            data = json.loads(assessment_path.read_text())
+            if isinstance(data, dict):
+                vulns = data.get("vulnerabilities", [])
+            else:
+                vulns = data
+            return [_process_assessment_vulnerability(v) for v in vulns if isinstance(v, dict)]
+    return []
+
+
+def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
+    env = os.environ.copy()
+    env["STRIX_SANDBOX_MODE"] = "true"
+    env["LLM_API_KEY"] = request.api_key
+    env["OPENAI_API_KEY"] = request.api_key
+    deployment = request.deployment_name or "gpt-4o"
+    if request.api_base:
+        env["LLM_API_BASE"] = request.api_base
+        env["OPENAI_API_BASE"] = request.api_base
+        if "cognitiveservices.azure.com" in request.api_base or "openai.azure.com" in request.api_base:
+            env["AZURE_OPENAI_ENDPOINT"] = request.api_base
+    if request.deployment_name:
+        env["OPENAI_API_MODEL"] = request.deployment_name
+        env["AZURE_OPENAI_DEPLOYMENT_ID"] = request.deployment_name
+    # Map platform provider + base URL to litellm model prefix for STRIX_LLM
+    if request.api_base and ("cognitiveservices.azure.com" in request.api_base or "openai.azure.com" in request.api_base):
+        env["STRIX_LLM"] = f"azure/{deployment}"
+    elif request.provider == "deepseek":
+        env["STRIX_LLM"] = f"deepseek/{deployment}"
+    elif request.provider:
+        env["STRIX_LLM"] = f"{request.provider}/{deployment}"
+    else:
+        env["STRIX_LLM"] = f"openai/{deployment}"
+
+    timeout = int(os.getenv("STRIX_SANDBOX_EXECUTION_TIMEOUT", "3600"))
+    subprocess.run(
+        [sys.executable, "-m", "strix.interface.main", "--target", request.url, "--non-interactive"],
+        cwd=str(cwd),
+        env=env,
+        timeout=timeout,
+        check=False,
+    )
+
+    latest_run = _find_latest_run(cwd)
+    if latest_run:
+        findings = _load_vulnerabilities(latest_run)
+        if findings:
+            return findings
+    # Fallback: check workspace-level assessment files
+    return _load_workspace_assessment(cwd)
+
+
+async def _post_results(request: ScanRequest, findings: list[dict]) -> None:
+    webhook_url = WEBHOOK_URL
+    if not webhook_url:
+        print("No WEBHOOK_URL configured — scan results not delivered", file=sys.stderr)
+        return
+
+    scan_uuid = str(uuid.uuid4())
+    payload = {
+        "request_id": request.request_id,
+        "results": {
+            "tool": "strix",
+            "scan_name": f"strix_{scan_uuid}_1",
+            "issues": findings,
+            "extra_data": {
+                "repository_id": request.repository_id,
+                "first_time_scan": request.first_time_scan,
+                "external_tools": [],
+            },
+        },
+    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {request.token}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(webhook_url, json=payload, headers=headers)
+        response.raise_for_status()
+
+
+@app.post("/scan", status_code=202)
+async def scan(request: ScanRequest) -> dict[str, str]:
+    async def run_and_callback() -> None:
+        try:
+            cwd = Path(os.getcwd())
+            loop = asyncio.get_running_loop()
+            findings = await loop.run_in_executor(None, _run_strix_sync, request, cwd)
+            await _post_results(request, findings)
+        except Exception as e:
+            print(f"Strix scan error for request_id={request.request_id}: {e}", file=sys.stderr)
+
+    asyncio.create_task(run_and_callback())
+    return {"status": "accepted", "request_id": request.request_id}
+
+
+@app.get("/health")
+async def health_check() -> dict[str, Any]:
+    return {"status": "healthy", "webhook_configured": WEBHOOK_URL is not None}
 
 
 def main() -> None:
-    """Main entry point for the HTTP server."""
     http_server_enabled = os.getenv("HTTP_SERVER", "false").lower() == "true"
     if not http_server_enabled:
         raise RuntimeError("HTTP server should only run when HTTP_SERVER=true")
@@ -33,239 +248,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Start Strix HTTP server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")  # nosec
     parser.add_argument("--port", type=int, default=8089, help="Port to bind to")
-    parser.add_argument(
-        "--webhook-url",
-        type=str,
-        default=os.getenv("WEBHOOK_URL"),
-        help="Webhook URL to send scan results to",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=120,
-        help="Hard timeout in seconds for each request execution (default: 120)",
-    )
+    parser.add_argument("--webhook-url", type=str, default=os.getenv("MESSAGE_URL"), help="Callback URL for scan results")
     args = parser.parse_args()
 
-    # Set global variables
-    global WEBHOOK_URL, REQUEST_TIMEOUT
+    global WEBHOOK_URL
     WEBHOOK_URL = args.webhook_url
-    REQUEST_TIMEOUT = args.timeout
 
-    # Start the server
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-
-
-app = FastAPI()
-
-
-class ScanRequest(BaseModel):
-    repo_url: str
-    app_url: str
-
-
-class ScanResponse(BaseModel):
-    scan_id: str
-    status: str
-    message: str | None = None
-
-
-def clone_repository(repo_url: str, dest_dir: Path) -> Path:
-    """Clone a git repository to a temporary directory."""
-    git_executable = shutil.which("git")
-    if git_executable is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Git executable not found in PATH"
-        )
-
-    repo_name = Path(repo_url).stem if repo_url.endswith(".git") else Path(repo_url).name
-    clone_path = dest_dir / repo_name
-
-    if clone_path.exists():
-        shutil.rmtree(clone_path)
-
-    try:
-        result = subprocess.run(
-            [
-                git_executable,
-                "clone",
-                repo_url,
-                str(clone_path),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return clone_path
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.strip() if e.stderr else e.stdout.strip()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to clone repository: {error_msg}"
-        ) from e
-
-
-def run_strix_scan(repo_path: Path, app_url: str, scan_id: str, cwd: Path | None = None) -> dict[str, Any]:
-    """Run strix scan with both repository and web application targets."""
-    # Prepare environment variables for strix
-    env = os.environ.copy()
-    env.setdefault("STRIX_RUNTIME_BACKEND", "docker")
-    # Ensure sandbox mode is true (we're already in container with tool server)
-    env["STRIX_SANDBOX_MODE"] = "true"
-
-    if cwd is None:
-        cwd = Path(os.getcwd())
-
-    # Run strix command with two targets
-    cmd = [
-        sys.executable, "-m", "strix.interface.main",
-        "--target", str(repo_path),
-        "--target", app_url,
-        "--non-interactive",
-        "--scan-mode", "standard"
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=REQUEST_TIMEOUT,
-            cwd=str(cwd),
-            env=env,
-        )
-
-        # Find the latest strix run directory
-        strix_runs_dir = cwd / "strix_runs"
-        latest_run = None
-        latest_mtime = 0
-        if strix_runs_dir.exists():
-            for entry in strix_runs_dir.iterdir():
-                if entry.is_dir():
-                    mtime = entry.stat().st_mtime
-                    if mtime > latest_mtime:
-                        latest_mtime = mtime
-                        latest_run = entry
-
-        vulnerabilities_csv = None
-        penetration_test_report = None
-        if latest_run:
-            vulnerabilities_csv = latest_run / "vulnerabilities.csv"
-            penetration_test_report = latest_run / "penetration_test_report.md"
-            if not vulnerabilities_csv.exists():
-                vulnerabilities_csv = None
-            if not penetration_test_report.exists():
-                penetration_test_report = None
-
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "vulnerabilities_csv": vulnerabilities_csv,
-            "penetration_test_report": penetration_test_report,
-            "results_dir": latest_run,
-        }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=408,
-            detail=f"Scan timed out after {REQUEST_TIMEOUT} seconds"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Scan execution failed: {str(e)}"
-        ) from e
-
-
-async def send_webhook_results(scan_id: str, scan_results: dict[str, Any]) -> None:
-    """Send scan results to webhook URL with retry logic."""
-    if not WEBHOOK_URL:
-        return
-
-    payload = {
-        "scan_id": scan_id,
-        "status": "completed" if scan_results["returncode"] == 0 else "failed",
-        "vulnerabilities_csv_exists": scan_results["vulnerabilities_csv"] is not None,
-        "penetration_test_report_exists": scan_results["penetration_test_report"] is not None,
-        "stdout_snippet": scan_results["stdout"][-1000:],  # last 1000 chars
-        "stderr_snippet": scan_results["stderr"][-1000:],
-    }
-
-    retryer = tenacity.AsyncRetrying(
-        stop=tenacity.stop_after_attempt(3),
-        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
-        retry=tenacity.retry_if_exception_type(
-            (httpx.RequestError, httpx.HTTPStatusError)
-        ),
-        before_sleep=tenacity.before_sleep_log(logger=None, log_level=10),
-        reraise=True,
-    )
-
-    try:
-        async for attempt in retryer:
-            with attempt:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(WEBHOOK_URL, json=payload)
-                    response.raise_for_status()
-    except tenacity.RetryError as e:
-        # Log error but don't fail the request
-        print(f"Webhook delivery failed after retries: {e}", file=sys.stderr)
-    except Exception as e:
-        print(f"Webhook delivery failed: {e}", file=sys.stderr)
-
-
-@app.post("/scan", response_model=ScanResponse)
-async def scan(request: ScanRequest) -> ScanResponse:
-    """Endpoint to trigger a strix scan."""
-    scan_id = os.urandom(8).hex()
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        try:
-            # Clone repository
-            repo_path = clone_repository(request.repo_url, temp_path)
-
-            # Run strix scan
-            scan_results = run_strix_scan(repo_path, request.app_url, scan_id, cwd=temp_path)
-
-            # Send results via webhook (async, fire-and-forget)
-            asyncio.create_task(send_webhook_results(scan_id, scan_results))
-
-            return ScanResponse(
-                scan_id=scan_id,
-                status="completed",
-                message=f"Scan completed with return code {scan_results['returncode']}"
-            )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Scan failed: {str(e)}"
-            ) from e
-
-
-@app.get("/health")
-async def health_check() -> dict[str, Any]:
-    return {
-        "status": "healthy",
-        "http_server_enabled": os.getenv("HTTP_SERVER", "false").lower() == "true",
-        "webhook_configured": WEBHOOK_URL is not None,
-    }
-
-
-def signal_handler(_signum: int, _frame: Any) -> None:
-    if hasattr(signal, "SIGPIPE"):
-        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    sys.exit(0)
-
-
-if hasattr(signal, "SIGPIPE"):
-    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
