@@ -846,5 +846,38 @@ class Tracer:
 
         return self.interrupted_content.pop(agent_id, None)
 
+    def _recover_workspace_findings(self) -> None:
+        """Fallback: read /workspace/vulnerability_report.md from sandbox if no reports were created."""
+        if self.vulnerability_reports:
+            return  # already have reports, skip recovery
+
+        try:
+            import strix.runtime as _runtime_module
+            from strix.runtime.docker_runtime import DockerRuntime
+            from strix.tools.reporting.workspace_parser import parse_workspace_vulnerability_report
+
+            runtime = _runtime_module._global_runtime
+            if not isinstance(runtime, DockerRuntime):
+                return
+
+            content = runtime.read_workspace_file("/workspace/vulnerability_report.md")
+            if not content:
+                return
+
+            findings = parse_workspace_vulnerability_report(content)
+            for finding in findings:
+                try:
+                    self.add_vulnerability_report(**finding)
+                except Exception:
+                    logger.debug("Failed to recover finding: %s", finding.get("title"))
+
+            if findings:
+                logger.info(
+                    "Recovered %d finding(s) from workspace vulnerability report", len(findings)
+                )
+        except Exception:
+            logger.debug("Workspace findings recovery skipped")
+
     def cleanup(self) -> None:
+        self._recover_workspace_findings()  # try to read from sandbox before saving
         self.save_run_data(mark_complete=True)
