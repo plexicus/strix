@@ -31,7 +31,3 @@ class AbstractRuntime(ABC):
 
     def cleanup(self) -> None:
         raise NotImplementedError
-
-    def read_workspace_file(self, path: str) -> str | None:
-        """Read a file from the sandbox container. Returns None if not available."""
-        return None
