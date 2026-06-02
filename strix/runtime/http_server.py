@@ -151,22 +151,35 @@ def _load_workspace_assessment(cwd: Path) -> list[dict]:
     return []
 
 
-def _load_workspace_markdown_reports() -> list[dict]:
+def _find_best_workspace_report() -> tuple[str, str] | tuple[None, None]:
     from strix.tools.reporting.workspace_parser import parse_workspace_markdown
 
     workspace = Path("/workspace")
     if not workspace.exists():
-        return []
-    best: list[dict] = []
+        return None, None
+    best_count = 0
+    best_name: str | None = None
+    best_content: str | None = None
     for md_file in sorted(workspace.glob("*.md")):
         try:
             content = md_file.read_text(encoding="utf-8", errors="replace")
-            parsed = parse_workspace_markdown(content)
-            if len(parsed) > len(best):
-                best = [_process_vulnerability(v) for v in parsed]
+            count = len(parse_workspace_markdown(content))
+            if count > best_count:
+                best_count = count
+                best_name = md_file.name
+                best_content = content
         except OSError:
             continue
-    return best
+    return best_name, best_content
+
+
+def _load_workspace_markdown_reports() -> list[dict]:
+    from strix.tools.reporting.workspace_parser import parse_workspace_markdown
+
+    _, content = _find_best_workspace_report()
+    if not content:
+        return []
+    return [_process_vulnerability(v) for v in parse_workspace_markdown(content)]
 
 
 def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
@@ -222,17 +235,22 @@ async def _post_results(request: ScanRequest, findings: list[dict]) -> None:
         return
 
     scan_uuid = str(uuid.uuid4())
+    extra_data: dict[str, Any] = {
+        "repository_id": request.repository_id,
+        "first_time_scan": request.first_time_scan,
+        "external_tools": [],
+    }
+    report_name, report_content = _find_best_workspace_report()
+    if report_name and report_content:
+        extra_data["pentest_report"] = {"name": report_name, "content": report_content}
+
     payload = {
         "request_id": request.request_id,
         "results": {
             "tool": "strix",
             "scan_name": f"strix_{scan_uuid}_1",
             "issues": findings,
-            "extra_data": {
-                "repository_id": request.repository_id,
-                "first_time_scan": request.first_time_scan,
-                "external_tools": [],
-            },
+            "extra_data": extra_data,
         },
     }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {request.token}"}
