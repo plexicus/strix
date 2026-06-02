@@ -151,6 +151,24 @@ def _load_workspace_assessment(cwd: Path) -> list[dict]:
     return []
 
 
+def _load_workspace_markdown_reports() -> list[dict]:
+    from strix.tools.reporting.workspace_parser import parse_workspace_markdown
+
+    workspace = Path("/workspace")
+    if not workspace.exists():
+        return []
+    best: list[dict] = []
+    for md_file in sorted(workspace.glob("*.md")):
+        try:
+            content = md_file.read_text(encoding="utf-8", errors="replace")
+            parsed = parse_workspace_markdown(content)
+            if len(parsed) > len(best):
+                best = [_process_vulnerability(v) for v in parsed]
+        except OSError:
+            continue
+    return best
+
+
 def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
     env = os.environ.copy()
     env["STRIX_SANDBOX_MODE"] = "true"
@@ -189,8 +207,12 @@ def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
         findings = _load_vulnerabilities(latest_run)
         if findings:
             return findings
-    # Fallback: check workspace-level assessment files
-    return _load_workspace_assessment(cwd)
+    # Fallback: check workspace-level assessment JSON files
+    findings = _load_workspace_assessment(cwd)
+    if findings:
+        return findings
+    # Final fallback: parse markdown vulnerability reports written by the agent to /workspace/
+    return _load_workspace_markdown_reports()
 
 
 async def _post_results(request: ScanRequest, findings: list[dict]) -> None:
