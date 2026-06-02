@@ -115,8 +115,11 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
     elif impact:
         description = f"{description}\n\nImpact: {impact}"
 
-    evidence = vuln.get("evidence", "")
-    poc = evidence if isinstance(evidence, str) else (json.dumps(evidence) if evidence else "")
+    # Prefer explicit poc field; fall back to evidence then reproduction steps
+    poc = vuln.get("poc") or ""
+    if not poc:
+        evidence = vuln.get("evidence", "")
+        poc = evidence if isinstance(evidence, str) else (json.dumps(evidence) if evidence else "")
     poc = poc or "\n".join(vuln.get("reproduction") or [])
 
     cwe_raw = vuln.get("cwe", "")
@@ -129,7 +132,7 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
         "actual_line": 0,
         "category": "Application",
         "cve": None,
-        "cvssv3_vector": None,
+        "cvssv3_vector": vuln.get("cvss_vector"),
         "cwe": cwe,
         "date": {"$date": datetime.now(timezone.utc).isoformat()},
         "description": description,
@@ -148,20 +151,79 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
     }
 
 
+_WORKSPACE_ASSESSMENT_NAMES = (
+    "juice_shop_assessment.json",
+    "assessment.json",
+    "findings.json",
+    "complete_assessment_report.json",
+    "final_comprehensive_report.json",
+    "final_report.json",
+    "report.json",
+)
+
+
+def _extract_vulns_from_json(data: object) -> list[dict]:
+    """Return the list of vulnerability dicts from any known JSON structure."""
+    if isinstance(data, list):
+        return [v for v in data if isinstance(v, dict)]
+    if isinstance(data, dict):
+        for key in ("vulnerabilities", "findings", "issues", "results"):
+            val = data.get(key)
+            if isinstance(val, list) and val:
+                return [v for v in val if isinstance(v, dict)]
+    return []
+
+
 def _load_workspace_assessment(cwd: Path) -> list[dict]:
     # Check both the process cwd and /workspace (agent always writes there)
     search_dirs = [cwd, Path("/workspace")]
-    for name in ("juice_shop_assessment.json", "assessment.json", "findings.json"):
+
+    # Try known filenames first
+    for name in _WORKSPACE_ASSESSMENT_NAMES:
         for dir_path in search_dirs:
             assessment_path = dir_path / name
             if assessment_path.exists():
-                data = json.loads(assessment_path.read_text())
-                if isinstance(data, dict):
-                    vulns = data.get("vulnerabilities", [])
-                else:
-                    vulns = data
-                return [_process_assessment_vulnerability(v) for v in vulns if isinstance(v, dict)]
+                try:
+                    data = json.loads(assessment_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                vulns = _extract_vulns_from_json(data)
+                if vulns:
+                    return [_process_assessment_vulnerability(v) for v in vulns]
+
+    # Wildcard scan: any *.json in /workspace that contains a findings/vulnerabilities array
+    workspace = Path("/workspace")
+    if workspace.exists():
+        for json_file in sorted(workspace.glob("*.json")):
+            if json_file.name in _WORKSPACE_ASSESSMENT_NAMES:
+                continue  # already tried above
+            try:
+                data = json.loads(json_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            vulns = _extract_vulns_from_json(data)
+            if vulns:
+                return [_process_assessment_vulnerability(v) for v in vulns]
+
     return []
+
+
+def _load_workspace_json_reports() -> list[dict]:
+    """Load individual vulnerability JSON files from /workspace/vulnerability_reports/."""
+    reports_dir = Path("/workspace/vulnerability_reports")
+    if not reports_dir.exists():
+        return []
+    vulns = []
+    for json_file in sorted(reports_dir.glob("*.json")):
+        try:
+            data = json.loads(json_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            vulns.append(_process_assessment_vulnerability(data))
+        elif isinstance(data, list):
+            vulns.extend(_process_assessment_vulnerability(v) for v in data if isinstance(v, dict))
+    return vulns
 
 
 def _find_best_workspace_report() -> tuple[str, str] | tuple[None, None]:
@@ -247,6 +309,10 @@ def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
             return findings
     # Fallback: check workspace-level assessment JSON files
     findings = _load_workspace_assessment(cwd)
+    if findings:
+        return findings
+    # Fallback: individual JSON files in /workspace/vulnerability_reports/
+    findings = _load_workspace_json_reports()
     if findings:
         return findings
     # Final fallback: parse markdown vulnerability reports written by the agent to /workspace/
