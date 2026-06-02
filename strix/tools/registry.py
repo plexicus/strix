@@ -210,31 +210,29 @@ def register_tool(
             "sandbox_execution": sandbox_execution,
         }
 
-        if not sandbox_mode:
-            try:
-                schema_path = _get_schema_path(f)
-                xml_tools = _load_xml_schema(schema_path) if schema_path else None
+        try:
+            schema_path = _get_schema_path(f)
+            xml_tools = _load_xml_schema(schema_path) if schema_path else None
 
-                if xml_tools is not None and f.__name__ in xml_tools:
-                    func_dict["xml_schema"] = xml_tools[f.__name__]
-                else:
-                    func_dict["xml_schema"] = (
-                        f'<tool name="{f.__name__}">'
-                        "<description>Schema not found for tool.</description>"
-                        "</tool>"
-                    )
-            except (TypeError, FileNotFoundError) as e:
-                logger.warning(f"Error loading schema for {f.__name__}: {e}")
+            if xml_tools is not None and f.__name__ in xml_tools:
+                func_dict["xml_schema"] = xml_tools[f.__name__]
+            else:
                 func_dict["xml_schema"] = (
                     f'<tool name="{f.__name__}">'
-                    "<description>Error loading schema.</description>"
+                    "<description>Schema not found for tool.</description>"
                     "</tool>"
                 )
+        except (TypeError, FileNotFoundError) as e:
+            logger.warning(f"Error loading schema for {f.__name__}: {e}")
+            func_dict["xml_schema"] = (
+                f'<tool name="{f.__name__}">'
+                "<description>Error loading schema.</description>"
+                "</tool>"
+            )
 
-        if not sandbox_mode:
-            xml_schema = func_dict.get("xml_schema")
-            param_schema = _parse_param_schema(xml_schema if isinstance(xml_schema, str) else "")
-            _tool_param_schemas[str(func_dict["name"])] = param_schema
+        xml_schema = func_dict.get("xml_schema")
+        param_schema = _parse_param_schema(xml_schema if isinstance(xml_schema, str) else "")
+        _tool_param_schemas[str(func_dict["name"])] = param_schema
 
         tools.append(func_dict)
         _tools_by_name[str(func_dict["name"])] = f
