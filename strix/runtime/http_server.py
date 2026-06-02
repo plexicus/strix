@@ -107,21 +107,31 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
     sev = _normalize_severity(str(vuln.get("severity", "medium")))
     title = vuln.get("title", "Security Vulnerability")
     endpoint = vuln.get("endpoint") or (vuln.get("endpoints") or [""])[0]
+
+    description = vuln.get("description", "")
     impact = vuln.get("impact", "")
-    evidence = vuln.get("evidence", {})
-    desc_parts = [impact]
-    if evidence:
-        desc_parts.append(f"Evidence: {json.dumps(evidence)}")
-    description = " | ".join(p for p in desc_parts if p)
-    poc = "\n".join(vuln.get("reproduction") or [])
+    if not description:
+        description = impact
+    elif impact:
+        description = f"{description}\n\nImpact: {impact}"
+
+    evidence = vuln.get("evidence", "")
+    poc = evidence if isinstance(evidence, str) else (json.dumps(evidence) if evidence else "")
+    poc = poc or "\n".join(vuln.get("reproduction") or [])
+
+    cwe_raw = vuln.get("cwe", "")
+    cwe = [cwe_raw] if isinstance(cwe_raw, str) and cwe_raw else (cwe_raw if isinstance(cwe_raw, list) else [])
+
+    mitigation = vuln.get("remediation") or vuln.get("mitigation", "")
+
     return {
         "original_line": 0,
         "actual_line": 0,
         "category": "Application",
         "cve": None,
         "cvssv3_vector": None,
-        "cwe": [],
-        "date": {"$date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()},
+        "cwe": cwe,
+        "date": {"$date": datetime.now(timezone.utc).isoformat()},
         "description": description,
         "references": [],
         "scanner_report_code": poc,
@@ -133,7 +143,7 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
         "tool_id": vuln.get("id", "strix-dast"),
         "type": "DAST",
         "confidence": 85,
-        "mitigation": "",
+        "mitigation": mitigation,
         "endpoint": endpoint,
     }
 
