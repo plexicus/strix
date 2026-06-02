@@ -5,11 +5,27 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-_SEVERITY_PATTERN = re.compile(r"\[(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\]", re.IGNORECASE)
+# Matches [CRITICAL], (CRITICAL), or bare CRITICAL in headings
+_SEVERITY_PATTERN = re.compile(
+    r"[\[(]?(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)[\])]?",
+    re.IGNORECASE,
+)
 _SEVERITY_INLINE = re.compile(r"\b(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\b", re.IGNORECASE)
-# Matches: "## 1. ", "## V-01: ", "## V12: ", "### Finding 1:", "### Finding 1 -"
+
+# Matches all observed agent heading formats:
+#   "## 1. "            → numbered list
+#   "## V-01: "         → V-prefixed
+#   "## V12: "          → V-prefixed no hyphen
+#   "### Finding 1: "   → Finding label
+#   "## VULNERABILITY 1:"  → VULNERABILITY label
+#   "## FINDING-001: "  → FINDING label
 _HEADING_PATTERN = re.compile(
-    r"^(?:#{2,3})\s+(?:\d+\.|V-?\d+:|Finding\s+\d+[:\s-])\s*",
+    r"^(?:#{2,3})\s+(?:"
+    r"\d+\."
+    r"|V-?\d+:"
+    r"|(?:Finding|FINDING)[\s\-]+\d+[:\s\-]"
+    r"|(?:VULNERABILITY|Vulnerability)\s+\d+:"
+    r")\s*",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -27,24 +43,34 @@ def _normalize_severity(raw: str) -> str:
 
 
 def _extract_section(text: str, *headers: str) -> str:
+    """Extract content under a ### Header or **Header:** bold key."""
     for header in headers:
+        # Try ### heading first
         pattern = re.compile(
             rf"###\s+{re.escape(header)}\s*\n(.*?)(?=\n###|\Z)", re.DOTALL | re.IGNORECASE
         )
         m = pattern.search(text)
         if m:
             return m.group(1).strip()
+        # Try **Header:** bold key (no leading ###)
+        pattern2 = re.compile(
+            rf"\*\*{re.escape(header)}[:\*]{{1,3}}\*?\*?\s*\n?(.*?)(?=\n\*\*[A-Z]|\n###|\Z)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        m2 = pattern2.search(text)
+        if m2:
+            return m2.group(1).strip()
     return ""
 
 
 def _extract_preamble(rest: str) -> str:
-    """Extract intro text before the first ### subsection (for agent-format reports)."""
-    m = re.match(r"(.*?)(?=\n###|\Z)", rest, re.DOTALL)
+    """Extract intro text before the first ### or **Bold:** subsection."""
+    m = re.match(r"(.*?)(?=\n###|\n\*\*[A-Za-z]|\Z)", rest, re.DOTALL)
     if not m:
         return ""
     text = m.group(1).strip()
-    # Remove the **Endpoint:** line since it's captured separately
-    text = re.sub(r"\*\*Endpoint[^*]*\*\*[^\n]*\n?", "", text).strip()
+    # Remove endpoint line captured separately
+    text = re.sub(r"\*\*(?:Endpoint|Location)[^*]*\*\*[^\n]*\n?", "", text, flags=re.IGNORECASE).strip()
     return text
 
 
@@ -55,56 +81,68 @@ def _extract_code_block(text: str) -> str:
     return text.strip()
 
 
-def parse_workspace_markdown(content: str) -> list[dict[str, Any]]:
-    """Parse a vulnerability report markdown written by the agent to /workspace/.
+def _extract_severity_from_block(first_line: str, rest: str) -> str:
+    """Try multiple strategies to find severity in a vulnerability block."""
+    # 1. [CRITICAL] or (CRITICAL) in the heading line
+    m = re.search(r"[\[(](?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)[\])]", first_line, re.IGNORECASE)
+    if m:
+        return _normalize_severity(m.group("sev"))
+    # 2. Bare word at end of heading like "... (CRITICAL)" already stripped, try inline
+    m = _SEVERITY_INLINE.search(first_line)
+    if m:
+        return _normalize_severity(m.group("sev"))
+    # 3. **Severity:** value or **Risk:** value in block body
+    m = re.search(
+        r"\*\*(?:Severity|Risk|Priority)[:\*]+\*?\*?\s*(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\b",
+        rest, re.IGNORECASE,
+    )
+    if m:
+        return _normalize_severity(m.group("sev"))
+    # 4. ### Severity section
+    sev_section = _extract_section(rest, "Severity", "Risk")
+    if sev_section:
+        m = _SEVERITY_INLINE.search(sev_section)
+        if m:
+            return _normalize_severity(m.group("sev"))
+    return "Medium"
 
-    Expected format produced by the agent:
-        ## N. [SEVERITY] Title
-        **Endpoint:** ...
-        ### Description
-        ...
-        ### Proof of Concept
-        ```
-        ...
-        ```
-        ### Impact
-        ...
-        ### Remediation
-        ...
-        ---
+
+def parse_workspace_markdown(content: str) -> list[dict[str, Any]]:
+    """Parse vulnerability reports written by the strix agent to /workspace/.
+
+    Handles multiple formats produced by different agent runs:
+      ## N. [SEVERITY] Title
+      ## V-01: TITLE [SEVERITY]
+      ### Finding N: Title
+      ## VULNERABILITY N: Title (SEVERITY)
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     vulns: list[dict[str, Any]] = []
 
-    # Split by top-level vulnerability headings (## N.)
     splits = _HEADING_PATTERN.split(content)
-    # The part before the first heading (preamble / title page) is splits[0]; skip it.
     headings = _HEADING_PATTERN.findall(content)
 
     for idx, heading_prefix in enumerate(headings):
         block = splits[idx + 1]
-        # First line of block is the rest of the heading after "## N. "
         first_line, _, rest = block.partition("\n")
         first_line = first_line.strip()
 
-        # Try [SEVERITY] in heading, then **Severity:** key-value, then ### Severity section
-        sev_match = (
-            _SEVERITY_PATTERN.search(first_line)
-            or re.search(r"\*\*Severity[:\*]+\*?\*?\s*(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\b", rest, re.IGNORECASE)
-            or _SEVERITY_INLINE.search(_extract_section(rest, "Severity") or _extract_section(rest, "Risk"))
-        )
-        severity = _normalize_severity(sev_match.group("sev")) if sev_match else "Medium"
-        title = _SEVERITY_PATTERN.sub("", first_line).strip(" -[]")
+        severity = _extract_severity_from_block(first_line, rest)
 
-        # Endpoint
-        endpoint_match = re.search(r"\*\*Endpoint[:\*]+\*?\*?\s*(.+)", rest)
+        # Clean severity markers and label prefix from title
+        title = re.sub(r"[\[(](?:CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)[\])]", "", first_line, flags=re.IGNORECASE)
+        title = re.sub(r"\s*\((?:CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\)\s*$", "", title, flags=re.IGNORECASE)
+        title = title.strip(" -[]:()")
+
+        # Endpoint / Location
+        endpoint_match = re.search(r"\*\*(?:Endpoint|Location)[:\*]+\*?\*?\s*(.+)", rest, re.IGNORECASE)
         endpoint = endpoint_match.group(1).strip() if endpoint_match else ""
 
         description = _extract_section(rest, "Description") or _extract_preamble(rest)
-        poc_raw = _extract_section(rest, "Proof of Concept", "PoC", "Proof-of-Concept")
+        poc_raw = _extract_section(rest, "Proof of Concept", "PoC", "Proof-of-Concept", "Proof", "Evidence")
         poc = _extract_code_block(poc_raw) if poc_raw else ""
         impact = _extract_section(rest, "Impact")
-        remediation = _extract_section(rest, "Remediation", "Remediation Steps")
+        remediation = _extract_section(rest, "Remediation", "Remediation Steps", "Fix", "Mitigation")
 
         content_parts = [description]
         if impact:
