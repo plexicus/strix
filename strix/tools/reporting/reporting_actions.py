@@ -208,12 +208,13 @@ def create_vulnerability_report(  # noqa: PLR0912
     poc_description: str,
     poc_script_code: str,
     remediation_steps: str,
-    cvss_breakdown: str,
+    cvss_breakdown: str | None = None,
     endpoint: str | None = None,
     method: str | None = None,
     cve: str | None = None,
     cwe: str | None = None,
     code_locations: str | None = None,
+    severity: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -226,11 +227,18 @@ def create_vulnerability_report(  # noqa: PLR0912
         remediation_steps=remediation_steps,
     )
 
-    parsed_cvss = parse_cvss_xml(cvss_breakdown)
-    if not parsed_cvss:
-        validation_errors.append("cvss: could not parse CVSS breakdown XML")
-    else:
+    _SEVERITY_SCORE_MAP = {"critical": 9.0, "high": 7.5, "medium": 5.0, "low": 2.5, "informational": 0.0}
+    parsed_cvss = parse_cvss_xml(cvss_breakdown) if cvss_breakdown else None
+    if parsed_cvss:
         validation_errors.extend(_validate_cvss_parameters(**parsed_cvss))
+        cvss_score, severity_label, cvss_vector = calculate_cvss_and_severity(**parsed_cvss)
+    elif severity:
+        cvss_score = _SEVERITY_SCORE_MAP.get(severity.lower(), 5.0)
+        severity_label = severity.capitalize()
+        cvss_vector = None
+    else:
+        validation_errors.append("cvss: provide either cvss_breakdown XML or a severity label")
+        cvss_score, severity_label, cvss_vector = 5.0, "Medium", None
 
     parsed_locations = parse_code_locations_xml(code_locations) if code_locations else None
 
@@ -249,9 +257,6 @@ def create_vulnerability_report(  # noqa: PLR0912
 
     if validation_errors:
         return {"success": False, "message": "Validation failed", "errors": validation_errors}
-
-    assert parsed_cvss is not None
-    cvss_score, severity, cvss_vector = calculate_cvss_and_severity(**parsed_cvss)
 
     try:
         from strix.telemetry.tracer import get_global_tracer
@@ -300,7 +305,7 @@ def create_vulnerability_report(  # noqa: PLR0912
             report_id = tracer.add_vulnerability_report(
                 title=title,
                 description=description,
-                severity=severity,
+                severity=severity_label,
                 impact=impact,
                 target=target,
                 technical_analysis=technical_analysis,
@@ -320,13 +325,13 @@ def create_vulnerability_report(  # noqa: PLR0912
                 "success": True,
                 "message": f"Vulnerability report '{title}' created successfully",
                 "report_id": report_id,
-                "severity": severity,
+                "severity": severity_label,
                 "cvss_score": cvss_score,
             }
 
         import logging
 
-        logging.warning("Current tracer not available - vulnerability report not stored")
+        logging.critical("Tracer not initialized — vulnerability report NOT stored. Check process wiring.")
 
     except (ImportError, AttributeError) as e:
         return {"success": False, "message": f"Failed to create vulnerability report: {e!s}"}
