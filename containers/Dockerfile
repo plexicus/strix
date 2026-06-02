@@ -109,7 +109,11 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git && \
 
 USER root
 
-RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+RUN TRUFFLEHOG_VERSION="3.95.3" && \
+    curl -sSfL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
+    -o /tmp/trufflehog.tar.gz && \
+    tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog && \
+    rm /tmp/trufflehog.tar.gz
 
 RUN apt-get update && apt-get install -y zaproxy
 
