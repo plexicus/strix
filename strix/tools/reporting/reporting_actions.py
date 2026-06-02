@@ -198,7 +198,7 @@ def _validate_cvss_parameters(**kwargs: str) -> list[str]:
     return validation_errors
 
 
-@register_tool(sandbox_execution=False)
+@register_tool(sandbox_execution=True)
 def create_vulnerability_report(  # noqa: PLR0912
     title: str,
     description: str,

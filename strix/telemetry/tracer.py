@@ -755,6 +755,27 @@ class Tracer:
                     )
                 logger.info("Updated vulnerability index: %s", vuln_csv_file)
 
+                # Write report.json for HTTP server retrieval (sandbox mode)
+                report_json = {
+                    "findings": [
+                        {
+                            "title": r.get("title", ""),
+                            "severity": r.get("severity", "medium"),
+                            "endpoint": r.get("endpoint", ""),
+                            "description": r.get("description", ""),
+                            "impact": r.get("impact", ""),
+                            "poc": r.get("poc_script_code") or r.get("poc_description", ""),
+                            "remediation": r.get("remediation_steps", ""),
+                            "cwe": r.get("cwe", ""),
+                        }
+                        for r in self.vulnerability_reports
+                    ]
+                }
+                report_json_path = run_dir / "report.json"
+                with report_json_path.open("w", encoding="utf-8") as f:
+                    json.dump(report_json, f, indent=2)
+                logger.info("Saved report.json to: %s", report_json_path)
+
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
                 self._emit_event(

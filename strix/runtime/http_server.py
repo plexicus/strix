@@ -76,9 +76,13 @@ def _load_vulnerabilities(run_dir: Path) -> list[dict]:
     for name in ("vulnerabilities.json", "report.json"):
         json_path = run_dir / name
         if json_path.exists():
-            data = json.loads(json_path.read_text())
-            vulns = data if isinstance(data, list) else data.get("vulnerabilities", [])
-            return [_process_vulnerability(v) for v in vulns]
+            try:
+                data = json.loads(json_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            vulns = _extract_vulns_from_json(data)
+            if vulns:
+                return [_process_assessment_vulnerability(v) for v in vulns]
 
     csv_path = run_dir / "vulnerabilities.csv"
     if csv_path.exists():
