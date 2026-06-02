@@ -6,8 +6,12 @@ from typing import Any
 
 
 _SEVERITY_PATTERN = re.compile(r"\[(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\]", re.IGNORECASE)
-# Matches both "## 1. " (original) and "## V-01: " / "## V12: " (agent-generated) formats
-_HEADING_PATTERN = re.compile(r"^##\s+(?:\d+\.|V-?\d+:)\s+", re.MULTILINE | re.IGNORECASE)
+_SEVERITY_INLINE = re.compile(r"\b(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\b", re.IGNORECASE)
+# Matches: "## 1. ", "## V-01: ", "## V12: ", "### Finding 1:", "### Finding 1 -"
+_HEADING_PATTERN = re.compile(
+    r"^(?:#{2,3})\s+(?:\d+\.|V-?\d+:|Finding\s+\d+[:\s-])\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def _normalize_severity(raw: str) -> str:
@@ -83,7 +87,12 @@ def parse_workspace_markdown(content: str) -> list[dict[str, Any]]:
         first_line, _, rest = block.partition("\n")
         first_line = first_line.strip()
 
-        sev_match = _SEVERITY_PATTERN.search(first_line)
+        # Try [SEVERITY] in heading, then **Severity:** key-value, then ### Severity section
+        sev_match = (
+            _SEVERITY_PATTERN.search(first_line)
+            or re.search(r"\*\*Severity[:\*]+\*?\*?\s*(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\b", rest, re.IGNORECASE)
+            or _SEVERITY_INLINE.search(_extract_section(rest, "Severity") or _extract_section(rest, "Risk"))
+        )
         severity = _normalize_severity(sev_match.group("sev")) if sev_match else "Medium"
         title = _SEVERITY_PATTERN.sub("", first_line).strip(" -[]")
 

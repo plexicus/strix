@@ -139,15 +139,18 @@ def _process_assessment_vulnerability(vuln: dict) -> dict:
 
 
 def _load_workspace_assessment(cwd: Path) -> list[dict]:
+    # Check both the process cwd and /workspace (agent always writes there)
+    search_dirs = [cwd, Path("/workspace")]
     for name in ("juice_shop_assessment.json", "assessment.json", "findings.json"):
-        assessment_path = cwd / name
-        if assessment_path.exists():
-            data = json.loads(assessment_path.read_text())
-            if isinstance(data, dict):
-                vulns = data.get("vulnerabilities", [])
-            else:
-                vulns = data
-            return [_process_assessment_vulnerability(v) for v in vulns if isinstance(v, dict)]
+        for dir_path in search_dirs:
+            assessment_path = dir_path / name
+            if assessment_path.exists():
+                data = json.loads(assessment_path.read_text())
+                if isinstance(data, dict):
+                    vulns = data.get("vulnerabilities", [])
+                else:
+                    vulns = data
+                return [_process_assessment_vulnerability(v) for v in vulns if isinstance(v, dict)]
     return []
 
 
@@ -160,9 +163,18 @@ def _find_best_workspace_report() -> tuple[str, str] | tuple[None, None]:
     best_count = 0
     best_name: str | None = None
     best_content: str | None = None
+    largest_name: str | None = None
+    largest_content: str | None = None
+    largest_size = 0
     for md_file in sorted(workspace.glob("*.md")):
         try:
             content = md_file.read_text(encoding="utf-8", errors="replace")
+            size = len(content)
+            # Track largest file as fallback for reports the parser can't parse
+            if size > largest_size:
+                largest_size = size
+                largest_name = md_file.name
+                largest_content = content
             count = len(parse_workspace_markdown(content))
             if count > best_count:
                 best_count = count
@@ -170,7 +182,10 @@ def _find_best_workspace_report() -> tuple[str, str] | tuple[None, None]:
                 best_content = content
         except OSError:
             continue
-    return best_name, best_content
+    # If the parser found structured findings, prefer that; otherwise return largest .md
+    if best_name:
+        return best_name, best_content
+    return largest_name, largest_content
 
 
 def _load_workspace_markdown_reports() -> list[dict]:
