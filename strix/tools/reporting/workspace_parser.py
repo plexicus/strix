@@ -6,7 +6,8 @@ from typing import Any
 
 
 _SEVERITY_PATTERN = re.compile(r"\[(?P<sev>CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL|INFO)\]", re.IGNORECASE)
-_HEADING_PATTERN = re.compile(r"^##\s+\d+\.\s+", re.MULTILINE)
+# Matches both "## 1. " (original) and "## V-01: " / "## V12: " (agent-generated) formats
+_HEADING_PATTERN = re.compile(r"^##\s+(?:\d+\.|V-?\d+:)\s+", re.MULTILINE | re.IGNORECASE)
 
 
 def _normalize_severity(raw: str) -> str:
@@ -30,6 +31,17 @@ def _extract_section(text: str, *headers: str) -> str:
         if m:
             return m.group(1).strip()
     return ""
+
+
+def _extract_preamble(rest: str) -> str:
+    """Extract intro text before the first ### subsection (for agent-format reports)."""
+    m = re.match(r"(.*?)(?=\n###|\Z)", rest, re.DOTALL)
+    if not m:
+        return ""
+    text = m.group(1).strip()
+    # Remove the **Endpoint:** line since it's captured separately
+    text = re.sub(r"\*\*Endpoint[^*]*\*\*[^\n]*\n?", "", text).strip()
+    return text
 
 
 def _extract_code_block(text: str) -> str:
@@ -79,7 +91,7 @@ def parse_workspace_markdown(content: str) -> list[dict[str, Any]]:
         endpoint_match = re.search(r"\*\*Endpoint[:\*]+\*?\*?\s*(.+)", rest)
         endpoint = endpoint_match.group(1).strip() if endpoint_match else ""
 
-        description = _extract_section(rest, "Description")
+        description = _extract_section(rest, "Description") or _extract_preamble(rest)
         poc_raw = _extract_section(rest, "Proof of Concept", "PoC", "Proof-of-Concept")
         poc = _extract_code_block(poc_raw) if poc_raw else ""
         impact = _extract_section(rest, "Impact")
