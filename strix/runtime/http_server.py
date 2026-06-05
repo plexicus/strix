@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 import json
+import logging
 import os
 import re
 import subprocess
@@ -12,6 +13,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import httpx
 import uvicorn
@@ -275,7 +278,7 @@ def _load_workspace_markdown_reports() -> list[dict]:
     return [_process_vulnerability(v) for v in parse_workspace_markdown(content)]
 
 
-def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
+def _run_strix_sync(request: ScanRequest, cwd: Path) -> tuple[list[dict], dict | None]:
     env = os.environ.copy()
     env["STRIX_SANDBOX_MODE"] = "true"
     env["LLM_API_KEY"] = request.api_key
@@ -300,32 +303,39 @@ def _run_strix_sync(request: ScanRequest, cwd: Path) -> list[dict]:
         env["STRIX_LLM"] = f"openai/{deployment}"
 
     timeout = int(os.getenv("STRIX_SANDBOX_EXECUTION_TIMEOUT", "3600"))
-    subprocess.run(
+    proc = subprocess.run(
         [sys.executable, "-m", "strix.interface.main", "--target", request.url, "--non-interactive"],
         cwd=str(cwd),
         env=env,
         timeout=timeout,
         check=False,
     )
+    error_info: dict | None = None
+    if proc.returncode != 0:
+        logger.warning("strix subprocess exited with code %d", proc.returncode)
+        error_info = {"code": "SUBPROCESS_CRASH", "message": f"subprocess exited with code {proc.returncode}"}
 
     latest_run = _find_latest_run(cwd)
     if latest_run:
         findings = _load_vulnerabilities(latest_run)
         if findings:
-            return findings
+            return findings, error_info
     # Fallback: check workspace-level assessment JSON files
     findings = _load_workspace_assessment(cwd)
     if findings:
-        return findings
+        return findings, error_info
     # Fallback: individual JSON files in /workspace/vulnerability_reports/
     findings = _load_workspace_json_reports()
     if findings:
-        return findings
+        return findings, error_info
     # Final fallback: parse markdown vulnerability reports written by the agent to /workspace/
-    return _load_workspace_markdown_reports()
+    findings = _load_workspace_markdown_reports()
+    if not findings and not error_info:
+        error_info = {"code": "FALLBACK_EXHAUSTED", "message": "no findings recovered from any fallback source"}
+    return findings, error_info
 
 
-async def _post_results(request: ScanRequest, findings: list[dict]) -> None:
+async def _post_results(request: ScanRequest, findings: list[dict], error_info: dict | None = None) -> None:
     webhook_url = WEBHOOK_URL
     if not webhook_url:
         print("No WEBHOOK_URL configured — scan results not delivered", file=sys.stderr)
@@ -347,6 +357,7 @@ async def _post_results(request: ScanRequest, findings: list[dict]) -> None:
             "tool": "strix",
             "scan_name": f"strix_{scan_uuid}_1",
             "issues": findings,
+            "error": error_info,
             "extra_data": extra_data,
         },
     }
@@ -363,8 +374,8 @@ async def scan(request: ScanRequest) -> dict[str, str]:
         try:
             cwd = Path(os.getcwd())
             loop = asyncio.get_running_loop()
-            findings = await loop.run_in_executor(None, _run_strix_sync, request, cwd)
-            await _post_results(request, findings)
+            findings, error_info = await loop.run_in_executor(None, _run_strix_sync, request, cwd)
+            await _post_results(request, findings, error_info)
         except Exception as e:
             print(f"Strix scan error for request_id={request.request_id}: {e}", file=sys.stderr)
 

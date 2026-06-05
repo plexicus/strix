@@ -58,8 +58,11 @@ Professional, customer-facing report rules (PDF-ready):
       <parameter name="remediation_steps" type="string" required="true">
         <description>Specific, actionable steps to fix the vulnerability</description>
       </parameter>
-      <parameter name="cvss_breakdown" type="string" required="true">
-        <description>CVSS 3.1 base score breakdown as nested XML. All 8 metrics are required.
+      <parameter name="severity" type="string" required="false">
+        <description>Severity label when CVSS XML is not available: Critical, High, Medium, Low, or Informational. Used only when cvss_breakdown is omitted or unparseable. Prefer providing full cvss_breakdown XML when possible.</description>
+      </parameter>
+      <parameter name="cvss_breakdown" type="string" required="false">
+        <description>CVSS 3.1 base score breakdown as nested XML. Provide this when you can compute all 8 metrics — it produces a precise CVSS score. If you cannot compute the full vector, omit this field and provide the severity parameter instead.
 
 Each metric element contains a single uppercase letter value:
 - attack_vector: N (Network), A (Adjacent), L (Local), P (Physical)
